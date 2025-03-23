@@ -3,58 +3,114 @@ library(tourr)
 library(tibble)
 library(dplyr)
 library(tidyr)
+library(purrr)
 
-winner <- function(p123, p132, p213, p231, p312, p321) {
-  # Compute stage 1 tallies
-  t1 <- p123 + p132
-  t2 <- p213 + p231
-  t3 <- p321 + p312
-  tallies <- c(t1,t2,t3)
-  # If there is a winner, return winner
-  if (any(c(tallies) > 0.5)) {
-    return(which(tallies > 0.5))
-  }
-  # Otherwise determine first elimination
-  elim <- which.min(tallies)
-  if (elim == 1) {
-    return(c(2,3)[which.max(c(p123+p213+p231, p132+p312+p321))])
-  } else if (elim == 2) {
-    return(c(1,3)[which.max(c(p123 + p132 + p213, p231 + p312 + p321))])
-  } else if (elim == 3) {
-    return(c(1,2)[which.max(c(p123 + p132 + p312, p213 + p231 + p321))])
+# Suppress summarise info
+options(dplyr.summarise.inform = FALSE)
+
+# Generate Dirichlet sample
+rdirichlet <- function(n, alpha) {
+  gams <- alpha |>
+    map(rgamma, n = n) |>
+    do.call(what = cbind)
+  return(gams / rowSums(gams))
+}
+
+# From https://stackoverflow.com/a/20199902
+# Produces lexicographical permutations
+permutations <- function(n){
+  if(n==1){
+      return(matrix(1))
+  } else {
+      sp <- permutations(n-1)
+      p <- nrow(sp)
+      A <- matrix(nrow=n*p,ncol=n)
+      for(i in 1:n){
+          A[(i-1)*p+1:p,] <- cbind(i,sp+(sp>=i))
+      }
+      return(A)
   }
 }
 
-by <- 0.05
-simplex_grid <- crossing(
-  p123 = seq(0, 1, by = by),
-  p132 = seq(0, 1, by = by),
-  p213 = seq(0, 1, by = by),
-  p231 = seq(0, 1, by = by),
-  p312 = seq(0, 1, by = by)
-) |>
-  filter(p123+p132+p213+p231+p312<1) |>
-  mutate(p321 = 1-p123-p132-p213-p231-p312) |>
-  rowwise() |>
-  mutate(winner = winner(p123, p132, p213, p231, p312, p321))
+irv_recursive <- function(p, n_cand, tol = 1e-5) {
+  # We assume p is a list with n_cand! elements, and the order of the ranked
+  # ballots is lexicographic, e.g., for n_cand=3:
+  # 123, 132, 213, 231, 312, 321.
+  assertthat::is.count(n_cand)
+  assertthat::assert_that(is.numeric(p))
+  assertthat::are_equal(length(p), factorial(n_cand))
 
+  if (n_cand == 2L) {
+    # Return index of winner
+    if (sum(max(p) - p < tol) > 1L) {
+      # return -1 if there is a draw
+      return(-1L)
+    } else {
+      return(which.max(p))
+    }
+  }
+
+  df <- permutations(n_cand) |>
+    cbind(p) |>
+    as_tibble() |>
+    suppressWarnings()
+
+  # Compute tallies
+  tallies <- df |>
+    group_by(V1) |>
+    summarise(p = sum(p))
+
+  # Determine eliminated candidate(s)
+  eliminated <- tallies$p - min(tallies$p) < tol
+
+  # Loop over cases for ties to check if the order matters for the outcome.
+  winner <- integer(length = n_cand)
+  for (i in seq_along(eliminated)) {
+    if (eliminated[i]) {
+      # Distribute preferences from eliminated candidate
+      
+      new_p <- df |>
+        apply(1L, \(x) x[-which(x == i)[1L]]) |>
+        t() |>
+        as_tibble() |>
+        rename(p = paste0("V", n_cand)) |>
+        group_by(across(-p)) |>
+        summarise(p = sum(p)) |>
+        pull(p)
+
+      winner[i] <- irv_recursive(new_p, n_cand - 1L, tol = tol)
+      if (winner[i] == -1L) {
+        # Return -1L if there is possibility for a draw
+        return(-1L)
+      }
+      if (winner[i] >= i) {
+        # Reindex from smaller sub-index
+        winner[i] <- winner[i] + 1L
+      }
+    }
+  }
+  winner <- winner[winner != 0L]
+  if (length(unique(winner)) > 1L) {
+    # Outcome depends on order of eliminating ties. Declare no winner.
+    return(-1L)
+  } else {
+    # Otherwise return the only winner.
+    return(unique(winner))
+  }
+}
 
 # Plot the decision boundary
-
 proj <- f_helmert(6) |>
   _[-1,] |>
   t()
+
+simplex_points <- rdirichlet(1000, c(1,1,1,1,1,1))
+simplex_proj <- as_tibble(simplex_points %*% proj)
+simplex_proj$winner <- simplex_points |>
+  apply(1L, irv_recursive, n_cand = 3)
+simplex_proj$labs <- rep(NA, 1000)
+
 simp <- simplex(p=5)
-
-simplex_proj <- simplex_grid |>
-  select(-winner) |>
-  as.matrix() |>
-  (\(x) x %*% proj)() |>
-  as.data.frame()
-simplex_proj$winner <- simplex_grid |>
-  pull(winner)
-simplex_proj$labs <- rep(NA, nrow(simplex_proj))
-
 sp <- simp$points |>
   data.frame()
 colnames(sp) <- paste0("x", 1:5)
