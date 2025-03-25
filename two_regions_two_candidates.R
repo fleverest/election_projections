@@ -3,6 +3,7 @@ library(tourr)
 library(tibble)
 library(dplyr)
 library(tidyr)
+library(purrr)
 
 # Generate Dirichlet sample
 rdirichlet <- function(n, alpha) {
@@ -34,22 +35,30 @@ proj <- f_helmert(4) |>
     _[-1,] |>
     t()
 
-simplex_points <- rdirichlet(100000, c(1,1,1,1))
+n_points <- 10000
+
+simplex_points <- rdirichlet(n_points, c(1,1,1,1))
 simplex_proj <- as_tibble(simplex_points %*% proj)
+simplex_proj$winner <- simplex_points |>
+  apply(1L, social_choice, difference = FALSE)
 simplex_proj$difference <- simplex_points |>
   apply(1L, social_choice, difference = TRUE)
-simplex_proj$labs <- rep(NA_character_, 100000)
+simplex_proj$labs <- rep(NA_character_, n_points)
 
 simp <- simplex(p=3)
 sp <- simp$points |>
     data.frame()
 colnames(sp) <- paste0("x", 1:3)
+sp$winner <- 0
 sp$difference <- 0
 sp$labs <- c("p[11]", "p[12]", "p[21]", "p[22]")
 
-colnames(simplex_proj) <- c(paste0("x", 1:3), "difference", "labs")
-full_simplex <- bind_rows(sp, simplex_proj |> filter(abs(difference) < 0.001))
-
+colnames(simplex_proj) <- c(paste0("x", 1:3), "winner", "difference", "labs")
+full_simplex <- bind_rows(
+    sp,
+    simplex_proj |>
+    filter(abs(difference) < 0.01)
+)
 
 # full_simplex |>
 #     select(-winner, -labs) |>
@@ -61,13 +70,12 @@ full_simplex <- bind_rows(sp, simplex_proj |> filter(abs(difference) < 0.001))
 #     )
 
 full_simplex |>
-    select(-difference, -labs) |>
-    mutate(x1=jitter(x1, 2), x2=jitter(x2, 2), x3=jitter(x3, 2)) |>    
+    select(-winner, -difference, -labs) |>
     render_gif(
         grand_tour(),
         display_xy(
-#            col = full_simplex$difference,
-#            palette="Viridis",
+#            col = full_simplex$winner,
+            palette="Viridis",
             obs_labels = full_simplex$labs,
             edges = as.matrix(simp$edges)
         ),
